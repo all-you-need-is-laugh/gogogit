@@ -1,0 +1,497 @@
+#!/usr/bin/env node
+
+// TODO: ~/.bash_aliases can be absent
+
+const { exec, spawn } = require("child_process");
+const fs = require('fs');
+const path = require('path');
+const readline = require('readline');
+const util = require('util');
+
+const DEBUG = process.env.DEBUG === 'true';
+const QUIET = process.argv.includes('-q');
+
+const HOME_DIR = require('os').homedir();
+const SSH_DIR = `${HOME_DIR}/.ssh`;
+const SSH_CONFIG_PATH = `${SSH_DIR}/config`;
+
+const CONFIG_URLS = {
+    'bitbucket.org': 'https://bitbucket.org/account/settings/ssh-keys/',
+    'github.com': 'https://github.com/settings/ssh/new',
+    'gitlab.com': 'https://gitlab.com/-/profile/keys',
+}
+
+const userInput = readline.createInterface({
+    input: process.stdin,
+    output: process.stdout
+});
+
+const $ = createColors();
+
+const appendFile = util.promisify(fs.appendFile);
+const readFileAsync = util.promisify(fs.readFile);
+const readFile = async path => readFileAsync(path, 'utf-8');
+const readDir = util.promisify(fs.readdir);
+const removeDir = util.promisify(fs.rmdir);
+
+async function main () {
+    debug('"DEBUG" mode enabled');
+    const { email, serviceName, projectUrl } = await parseArgs(process.argv.slice(2));
+    debug(`Parsed email: ${email}`);
+    debug(`Parsed serviceName: ${serviceName}`);
+    debug(`Parsed projectUrl: ${projectUrl}`);
+
+    const profile = getProfileName(serviceName, email)
+
+    const isProfileConfigured = await checkProfileExistence(profile);
+
+    let setupIsNeeded;
+    if (isProfileConfigured) {
+        if (isQuietMode('Question about setting up of SSH keys at the service')) {
+            setupIsNeeded = false;
+        } else {
+            console.log($.green(`Profile has been configured.`));
+            setupIsNeeded = await askBoolean(`Do you want to procceed with setting up SSH key in ${$.cyan(serviceName)}?`);
+        }
+    } else {
+        await configureProfile(email, profile);
+
+        console.log($.green(`Profile has been configured. Let's set up SSH key in ${$.cyan(serviceName)}`));
+        setupIsNeeded = true;
+    }
+
+    if (setupIsNeeded) {
+        await setupSshKey(email, serviceName);
+    }
+
+    const { repoDirectory, userSignature } = await prepareRepo(email, profile, projectUrl);
+
+    console.log($.green([
+        '',
+        'RESULTS:',
+        `Repository ${$.black.bgYellow(projectUrl)} clonned to ${$.black.bgYellow(path.join(process.cwd(), repoDirectory))}`,
+        `Git user configured as "${$.black.bgYellow(userSignature)}"`
+    ].join('\n')));
+}
+
+async function ask (message) {
+    return new Promise((resolve, reject) => {
+        const indentation = ask.__called ? '\n' : '';
+        ask.__called = true;
+        userInput.question(`${indentation}${$.blue(message)} `, (answer) => resolve(answer.trim()));
+    });
+}
+
+async function askBoolean (message, defaultYes = true) {
+    const suggestions = defaultYes ? '(Y/n)' : '(y/N)';
+    let fullMessage = `${message} ${suggestions}`;
+
+    let attempts = 0;
+    do {
+        const answer = await ask(fullMessage);
+
+        if (!answer) return defaultYes;
+        const firstLetter = answer[0].toLowerCase();
+
+        if (firstLetter === 'y') return true;
+        if (firstLetter === 'n') return false;
+
+        fullMessage = [
+            'Please, specify one of the following answers (case insensitive): y, n, yes, no.',
+            `Or press Enter for default answer (${defaultYes ? 'yes' : 'no'})`
+        ].join('\n');
+    } while(++attempts < 3);
+
+    console.error($.red("Correct answer was not provided during 3 attempts"));
+    process.exit(2);
+}
+
+async function checkProfileExistence (profile) {
+    debug(`Checking profile "${profile}" existence...`);
+
+    const config = await readSshConfig();
+    const result = new RegExp(`^Host ${profile}`, 'mg').test(config);
+
+    if (result) {
+        debug(`Checking profile "${profile}" finished - profile exists!`);
+    } else {
+        debug(`Checking profile "${profile}" finished - profile does not exist!`);
+    }
+
+    return result;
+}
+
+async function configureGitUser (email, repoDirectory) {
+    console.log(`Configuring git user for email "${$.magenta(email)}" in "${$.cyan(repoDirectory)}"...`)
+
+    const userName = await getGitUserName(email, repoDirectory);
+
+    const userSignature = `${userName} <${email}>`;
+    debug(`Setting git user as "${userSignature}"...`)
+
+    await executeBuffered(`git config user.name "${userName}"`, repoDirectory);
+    await executeBuffered(`git config user.email "${email}"`, repoDirectory);
+
+    debug(`Configuring git user as "${userSignature}" in "${repoDirectory}" succeeded!`)
+
+    return userSignature;
+}
+
+async function configureProfile (email, profile) {
+    debug(`Configuring profile "${profile}" in SSH config...`)
+
+    const keyName = getKeyName(email);
+    await createSshKey(keyName, email);
+
+    const configLines = [
+        '',
+        `# ${email}`,
+        `Host ${profile}`,
+        `  IdentityFile ~/.ssh/${keyName}`,
+        ''
+    ].join('\n');
+
+    await appendFile(SSH_CONFIG_PATH, configLines);
+
+    debug(`Configuring profile "${profile}" in SSH config succeeded!`)
+}
+
+function createColors () {
+    const closeColor = '\u001b[39m';
+    const closeBg = '\u001b[49m';
+    const closeTextStyle = '\u001b[22m';
+    const styles = {
+        reset: { open: '\u001b[0m', close: '\u001b[0m' },
+
+        bold: { open: '\u001b[1m', close: closeTextStyle },
+        dim: { open: '\u001b[2m', close: closeTextStyle },
+        hidden: { open: '\u001b[8m', close: '\u001b[28m' },
+        inverse: { open: '\u001b[7m', close: '\u001b[27m' },
+        italic: { open: '\u001b[3m', close: '\u001b[23m' },
+        strikethrough: { open: '\u001b[9m', close: '\u001b[29m' },
+        underline: { open: '\u001b[4m', close: '\u001b[24m' },
+
+        black: { open: '\u001b[30m', close: closeColor },
+        blackBright: { open: '\u001b[90m', close: closeColor },
+        blue: { open: '\u001b[34m', close: closeColor },
+        blueBright: { open: '\u001b[94m', close: closeColor },
+        cyan: { open: '\u001b[36m', close: closeColor },
+        cyanBright: { open: '\u001b[96m', close: closeColor },
+        gray: { open: '\u001b[90m', close: closeColor },
+        green: { open: '\u001b[32m', close: closeColor },
+        greenBright: { open: '\u001b[92m', close: closeColor },
+        grey: { open: '\u001b[90m', close: closeColor },
+        magenta: { open: '\u001b[35m', close: closeColor },
+        magentaBright: { open: '\u001b[95m', close: closeColor },
+        red: { open: '\u001b[31m', close: closeColor },
+        redBright: { open: '\u001b[91m', close: closeColor },
+        white: { open: '\u001b[37m', close: closeColor },
+        whiteBright: { open: '\u001b[97m', close: closeColor },
+        yellow: { open: '\u001b[33m', close: closeColor },
+        yellowBright: { open: '\u001b[93m', close: closeColor },
+
+        bgBlack: { open: '\u001b[40m', close: closeBg },
+        bgBlackBright: { open: '\u001b[100m', close: closeBg },
+        bgBlue: { open: '\u001b[44m', close: closeBg },
+        bgBlueBright: { open: '\u001b[104m', close: closeBg },
+        bgCyan: { open: '\u001b[46m', close: closeBg },
+        bgCyanBright: { open: '\u001b[106m', close: closeBg },
+        bgGray: { open: '\u001b[100m', close: closeBg },
+        bgGreen: { open: '\u001b[42m', close: closeBg },
+        bgGreenBright: { open: '\u001b[102m', close: closeBg },
+        bgGrey: { open: '\u001b[100m', close: closeBg },
+        bgMagenta: { open: '\u001b[45m', close: closeBg },
+        bgMagentaBright: { open: '\u001b[105m', close: closeBg },
+        bgRed: { open: '\u001b[41m', close: closeBg },
+        bgRedBright: { open: '\u001b[101m', close: closeBg },
+        bgWhite: { open: '\u001b[47m', close: closeBg },
+        bgWhiteBright: { open: '\u001b[107m', close: closeBg },
+        bgYellow: { open: '\u001b[43m', close: closeBg },
+        bgYellowBright: { open: '\u001b[103m', close: closeBg },
+    };
+
+    const availableStyles = Object.keys(styles);
+    const repeatingCloses = [closeColor, closeBg, closeTextStyle];
+    const applyStyle = (styleName, str) => {
+        const { open, close } = styles[styleName];
+
+        // restore style after internal style override if exists
+        for (const rClose of repeatingCloses) {
+            if (rClose !== close) continue;
+
+            const colorParts = str.split(rClose);
+            if (colorParts.length > 1) {
+                str = colorParts.join(rClose + open);
+            }
+        }
+
+        return `${open}${str}${close}`;
+    }
+    const getPartialStyler = (styleNames, part) => () => {
+        return styleNames.map(s => styles[s][part]).join('');
+    };
+    const createStyler = (styles = []) => new Proxy((str) => {
+        return styles.reduce((acc, style) => applyStyle(style, acc), str);
+    }, {
+        get(target, prop, receiver) {
+            if (['close', 'open'].includes(prop)) { return getPartialStyler(styles, prop); }
+
+            if (!availableStyles.includes(prop)) return target[prop];
+
+            return createStyler([...styles, prop]);
+        }
+    });
+
+    // Test colors
+    // const $ = createStyler();
+    // // for (const style of availableStyles) {
+    // //     console.log(style, $[style](`Hello world!`), $[style].bold(`Hello world!`), $.inverse[style](`Hello world!`));
+    // // }
+    // console.log($.green(`This is green text. ${$.red(`This text must be red. ${$.blue('This text must be blue.')} This text must be red again.`)} This text must be green again`));
+    // console.log($.green(`This is green text. ${$.red(`This text must be red.`)} This text must be green again. ${$.red(`This text must be red. ${$.blue('This text must be blue.')} This text must be red again.`)} This text must be green again`));
+    // console.log($.bgRed(`This is text w/ red bg. ${$.bgBlue('This text must have blue bg.')} This text must have red bg again`));
+    // console.log($.bgRed(`This is text w/ red bg. ${$.bgYellow(`This text must have yellow bg. ${$.blue(`This text must have yellow bg and blue color.`)}`)} This text must have red bg and default color again`));
+    // console.log($.bold(`This is just bold text. ${$.red('This text must be red and bold.')} This text must be just bold again`));
+    // console.log($.italic(`This is just italic text. ${$.red('This text must be red and italic.')} This text must be just italic again`));
+    // console.log($.underline(`This is just underlined text. ${$.red('This text must be red and underlined.')} This text must be just underlined again`));
+    // console.log($.bold(`This is just bold text. ${$.underline('This text must be underlined and bold.')} This text must be just bold again`));
+    // console.log($.bold(`This is just bold text. ${$.dim('This text must be dim and bold.')} This text must be just bold again`));
+    // process.exit();
+
+    return createStyler();
+}
+
+async function createSshKey (keyName, comment) {
+    const existingKeyFiles = await readDir(SSH_DIR, 'utf8');
+
+    if (existingKeyFiles.includes(keyName) && existingKeyFiles.includes(`${keyName}.pub`)) {
+        debug(`Requested key "${keyName}" exists`);
+        return;
+    }
+
+    return executeBuffered(`ssh-keygen -t ed25519 -f ${SSH_DIR}/${keyName} -C "${comment}" -q -N ""`);
+}
+
+function debug (message) {
+    if (DEBUG) {
+        console.debug($.grey.italic(message));
+    }
+}
+
+async function executeBuffered (command, cwd) {
+    debug(`Executing command (buffered): ${command} (cwd: ${cwd})`);
+
+    return new Promise((resolve, reject) => {
+        exec(command, { cwd }, (error, stdout, stderr) => {
+            if (error) return reject(error);
+
+            if (stderr) {
+                console.error(stderr);
+            }
+
+            resolve(stdout);
+        });
+    });
+}
+
+async function executePiped (fullCommand, cwd) {
+    debug(`Executing command: ${fullCommand} (cwd: ${cwd})`);
+
+    return new Promise((resolve, reject) => {
+        const [command, ...args] = fullCommand.split(' ');
+        const child = spawn(command, args);
+
+        child.stdout.on('data', data => console.log(String(data)));
+
+        child.stderr.on('data', data => console.error(String(data)));
+
+        child.on('error', reject);
+
+        child.on('close', (code) => {
+            if (!code) {
+                return resolve();
+            }
+
+            reject(new Error(`Command "${fullCommand}" exited with code ${code}`));
+        });
+    });
+}
+
+function getEmailSafeString (email) {
+    return email.replace('@', '__');
+}
+
+function getExampleStr (message) {
+    return `(${$.italic(`Example: ${$.cyan(message)}`)})`;
+}
+
+function getKeyName (email) {
+    return `work__${getEmailSafeString(email)}`
+}
+
+function getProfileName (serviceName, email) {
+    // Example: github.com-test.user__gmail.com
+    return `${serviceName}-${getEmailSafeString(email)}`;
+}
+
+async function getGitUserName (email, repoDirectory) {
+    const userSignature = await executeBuffered(
+        `git log --pretty=format:"%ae %an"  --all --branches --remotes | grep ${email} | head -n 1`,
+        repoDirectory
+    );
+
+    if (userSignature) {
+        const userName = /^[^ ]* ?(.*)$/.exec(userSignature.trim())[1];
+
+        if (isQuietMode('User name from git checking')) { return userName; }
+
+        const userAnswer = await ask([
+            `Following user name found in previous commits in git: ${$.red(userName)}.`,
+            `Specify another name or left empty to use found name:`
+        ].join('\n'));
+
+        return userAnswer || userName;
+    } else {
+        const emailName = email.split('@')[0];
+        const userName = emailName[0].toUpperCase() + emailName.substring(1);
+
+        if (isQuietMode('User name from email address')) { return userName; }
+
+        const userAnswer = await ask([
+            `Previous commits for this email were not found, so user name generated from email: ${$.red.bold(userName)}.`,
+            `Specify another name or left empty to use generated name:`
+        ].join('\n'));
+
+        return userAnswer || userName;
+    }
+}
+
+function isQuietMode (action) {
+    if (QUIET) {
+        debug(`${action} skipped due to "quiet" mode`);
+        return true;
+    }
+    return false;
+}
+
+async function parseArgs (passedArgs) {
+    let [passedEmail, passedProjectUrl] = passedArgs;
+
+    let email;
+    let projectUrl;
+    let inputAccepted;
+
+    do {
+        email = passedEmail || await ask(`Insert account email ${getExampleStr('john.doe@smart.com')}:`);
+
+        projectUrl = passedProjectUrl || await ask([
+            'Insert project clone URL or command',
+            getExampleStr('https://github.com/facebook/react.git'),
+            getExampleStr('git@github.com:facebook/react.git'),
+            getExampleStr('git clone https://github.com/facebook/react.git'),
+            getExampleStr('git clone git@github.com:facebook/react.git'),
+            ':'
+        ].join('\n'));
+
+        // clean passed params to re-specify email and projectUrl once again if needed
+        passedEmail = passedProjectUrl = null;
+
+        if (isQuietMode('Checking user input')) {
+            inputAccepted = true;
+        } else {
+            inputAccepted = await askBoolean([
+                `You specified email ${$.bgRed.white(email)} and git project URL ${$.bgRed.white(projectUrl)}.`,
+                `Do you want to proceed? (Choose ${$.cyan('no')} to specify other values)`
+            ].join('\n'));
+        }
+    } while(!inputAccepted)
+
+    const projectUrlParts = projectUrl
+        .replace(/^(git clone )?(?:https?:\/\/|git@)/gi, '')
+        .match(/^(?<serviceName>[^:\/]+)[:\/](?<projectUrl>.+)$/)
+        .groups;
+
+    if (!Object.keys(CONFIG_URLS).includes(projectUrlParts.serviceName)) {
+        throw new Error(`Unfortunately, ${projectUrlParts.serviceName} is not supported.`);
+    }
+
+    return { email, ...projectUrlParts };
+}
+
+async function prepareRepo (email, profile, projectUrl) {
+    debug(`Preparing repository "${projectUrl}"...`)
+
+    const repoDirectory = /([^\/]+).git$/.exec(projectUrl)[1];
+
+    let repoClonningIsNeeded = true;
+
+    const subDirectories = await readDir('.');
+
+    if (subDirectories.includes(repoDirectory)) {
+        repoClonningIsNeeded = false;
+
+        if (!isQuietMode('Repository re-creating')) {
+            if (await askBoolean(`Directory ${$.red(repoDirectory)} already exists in current directory. Do you want to ${$.red.bold('re-create')} the repository? ${$.red.bold('All repo data will be lost forever')}`, false)) {
+                debug('Removing the repo directory');
+                await removeDir(repoDirectory, { recursive: true });
+                repoClonningIsNeeded = true;
+            } else {
+                debug('Repo directory left untouched');
+            }
+        }
+    }
+
+    if (repoClonningIsNeeded) {
+        const repoOriginUrl = `${profile}:${projectUrl}`;
+
+        debug(`Clonning repository with origin URL "${repoOriginUrl}"...`);
+
+        await executePiped(`git clone ${repoOriginUrl}`);
+        console.log($.green(`Clonning repository succeeded!`));
+    }
+
+    const userSignature = await configureGitUser(email, repoDirectory);
+
+    debug(`Preparing repository "${projectUrl}" succeeded!`);
+
+    return { repoDirectory, userSignature };
+}
+
+async function readSshConfig () {
+    // just cache
+    if (readSshConfig.__content) return readSshConfig.__content;
+
+    const rawContent = await readFile(SSH_CONFIG_PATH);
+    const content = rawContent
+        .replace(/\#[^\n]*\n/gim, '')
+        .replace(/\n+/gim, '\n')
+
+    return readSshConfig.__content = content;
+}
+
+async function setupSshKey (email, serviceName) {
+    debug(`Settig up SSH key in "${serviceName}"...`)
+
+    const keyName = `${getKeyName(email)}.pub`;
+
+    const keyContent = await readFile(`${SSH_DIR}/${keyName}`);
+    const configUrl = CONFIG_URLS[serviceName];
+
+    await ask([
+        `Copy the following lines into your clipboard and paste them as SSH key content at ${$.cyan(configUrl)} (${$.magenta(`ensure, that you authenticated as ${$.red(email)}!`)}):`,
+        '',
+        $.red.bgWhite(keyContent),
+        '',
+        `Press ${$.green('Enter')} when you finish setup at ${$.cyan(serviceName)}.`
+    ].join('\n'));
+
+    debug(`Settig up SSH key in ${serviceName} succeeded!`)
+
+    // TODO: Check chmod for files and directories if needed
+
+    // TODO: Remove keys from SSH agent
+}
+
+main()
+    .then(() => 0, error => console.error($.red.open(), error, $.red.close()) || 1)
+    .then((status) => process.exit(status))
