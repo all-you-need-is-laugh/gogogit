@@ -7,22 +7,3 @@ Host github.com
 
 Host gitlab.com
   HostName DO_NOT_ACCESS_GITLAB_DIRECTLY!!!!!!!!!!!!!!!!
-
-### Restrict access only by Identity file + default settings
-Host bitbucket.org-*
-  IdentitiesOnly yes
-  HostName bitbucket.org
-  StrictHostKeyChecking no
-  User git
-
-Host github.com-*
-  IdentitiesOnly yes
-  HostName github.com
-  StrictHostKeyChecking no
-  User git
-
-Host gitlab.com-*
-  IdentitiesOnly yes
-  HostName gitlab.com
-  StrictHostKeyChecking no
-  User git
