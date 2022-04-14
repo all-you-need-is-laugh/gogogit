@@ -1,6 +1,16 @@
 #!/usr/bin/env node
 
-// TODO: ~/.bash_aliases can be absent
+const VERSION = '1.0.0';
+
+const PARAMETERS_SCHEMA = [
+    { name: 'email',      alias: 'e', type: String,  description: 'Account email' },
+    { name: 'repository', alias: 'r', type: String,  description: 'Repository URL or command' },
+    { name: 'path',       alias: 'p', type: String,  description: 'Local path for repository (Default: repository name in current working directory)' },
+    { name: 'ssh-key',    alias: 's', type: String,  description: 'Use existing SSH-key' },
+    { name: 'help',       alias: 'h', type: null,    description: 'Display this help and exit' },
+    { name: 'version',    alias: 'v', type: null,    description: 'Output version information and exit' },
+    { name: 'debug',      alias: 'd', type: Boolean, description: 'Show debug messages' },
+];
 
 const { exec, spawn } = require("child_process");
 const fs = require('fs');
@@ -8,8 +18,7 @@ const path = require('path');
 const readline = require('readline');
 const util = require('util');
 
-const DEBUG = process.env.DEBUG === 'true';
-const QUIET = process.argv.includes('-q');
+const ARGS = parseArgs(process.argv);
 
 const HOME_DIR = require('os').homedir();
 const SSH_DIR = `${HOME_DIR}/.ssh`;
@@ -27,63 +36,99 @@ const userInput = readline.createInterface({
 });
 
 const $ = createColors();
+let indentAskPrompt = false;
 
 const appendFile = util.promisify(fs.appendFile);
 const readFileAsync = util.promisify(fs.readFile);
 const readFile = async path => readFileAsync(path, 'utf-8');
 const readDir = util.promisify(fs.readdir);
-const removeDir = util.promisify(fs.rmdir);
 
 async function main () {
     debug('"DEBUG" mode enabled');
-    const { email, serviceName, projectUrl } = await parseArgs(process.argv.slice(2));
+    if (ARGS.error) {
+        console.error($.red(ARGS.error));
+        return showUsage();
+    }
+    if (ARGS.help) {
+        return showUsage();
+    }
+    if (ARGS.version) {
+        return showVersion();
+    }
+
+    logStepOpen('Step 1: check email and project');
+    const { email, serviceName, repoPath } = await ensureMainArgs(ARGS);
     debug(`Parsed email: ${email}`);
     debug(`Parsed serviceName: ${serviceName}`);
-    debug(`Parsed projectUrl: ${projectUrl}`);
+    debug(`Parsed repository path: ${repoPath}`);
+    logStepClose('~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~');
 
+    logStepOpen('Step 2: generate SSH key and setup profile in SSH config');
     const profile = getProfileName(serviceName, email)
 
     const isProfileConfigured = await checkProfileExistence(profile);
 
-    let setupIsNeeded;
     if (isProfileConfigured) {
-        if (isQuietMode('Question about setting up of SSH keys at the service')) {
-            setupIsNeeded = false;
-        } else {
-            console.log($.green(`Profile has been configured.`));
-            setupIsNeeded = await askBoolean(`Do you want to procceed with setting up SSH key in ${$.cyan(serviceName)}?`);
-        }
+        console.log($.cyan(`SSH key has already been generated and configured in SSH config earlier.`));
     } else {
-        await configureProfile(email, profile);
-
-        console.log($.green(`Profile has been configured. Let's set up SSH key in ${$.cyan(serviceName)}`));
-        setupIsNeeded = true;
+        const keyGenerated = await configureProfile(serviceName, email, profile, ARGS['ssh-key']);
+        if (keyGenerated) {
+            console.log($.green(`SSH key has just been generated and configured in SSH config.`));
+        } else {
+            console.log($.green(`SSH profile has just been configured in config.`));
+        }
     }
+    logStepClose('~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~');
 
-    if (setupIsNeeded) {
-        await setupSshKey(email, serviceName);
+    logStepOpen('Step 3: setup SSH key at remote service');
+    const setupRequested = !isProfileConfigured || await askBoolean([
+        $.grey(`Sometimes setup process can be stopped after SSH key generation, but before setup at ${$.cyan(serviceName)}.`),
+        `Do you want to procceed with setting up SSH key at ${$.cyan(serviceName)}?`
+    ].join('\n'));
+
+    if (setupRequested) {
+        await setupSshKeyAtRemoteService(email, serviceName);
     }
+    logStepClose('~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~');
 
-    const { repoDirectory, userSignature } = await prepareRepo(email, profile, projectUrl);
+    logStepOpen('Step 4: Clone repository');
+    const relativePath = ARGS.path ? ARGS.path : /([^/]+).git$/.exec(repoPath)[1];
+    const localFullPath = path.resolve(relativePath);
+    const repoCloned = await cloneRepo(email, profile, repoPath, localFullPath);
+    logStepClose('~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~');
 
-    console.log($.green([
-        '',
-        'RESULTS:',
-        `Repository ${$.black.bgYellow(projectUrl)} clonned to ${$.black.bgYellow(path.join(process.cwd(), repoDirectory))}`,
-        `Git user configured as "${$.black.bgYellow(userSignature)}"`
-    ].join('\n')));
+    logStepOpen('Step 5: Setup repository settings');
+    if (repoCloned || await askBoolean([
+        $.magenta(`Directory ${localFullPath} already exists in current directory.`),
+        `Do you want to proceed with user setup in that directory?`,
+    ].join(' '))) {
+        const userSignature = await configureGitUser(email, localFullPath);
+        console.log($.green([
+            '',
+            'RESULTS:',
+            `Repository ${$.black.bgYellow(repoPath)} clonned to ${$.black.bgYellow(localFullPath)}`,
+            `Git user configured as ${$.black.bgYellow(userSignature)}`
+        ].join('\n')));
+    } else {
+        console.log($.green([
+            '',
+            'RESULTS:',
+            `Repository ${$.black.bgYellow(repoPath)} clonning was ${$.magenta('SKIPPED')}`
+        ].join('\n')));
+    }
+    logStepClose('~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~');
 }
 
 async function ask (message) {
-    return new Promise((resolve, reject) => {
-        const indentation = ask.__called ? '\n' : '';
-        ask.__called = true;
+    return new Promise((resolve, _reject) => {
+        const indentation = indentAskPrompt ? '\n' : '';
+        indentAskPrompt = true;
         userInput.question(`${indentation}${$.blue(message)} `, (answer) => resolve(answer.trim()));
     });
 }
 
 async function askBoolean (message, defaultYes = true) {
-    const suggestions = defaultYes ? '(Y/n)' : '(y/N)';
+    const suggestions = defaultYes ? `(${$.cyan('Y')}/n, ${$.cyan('Enter')} for ${$.cyan('Yes')})` : `(y/${$.cyan('N')}, ${$.cyan('Enter')} for ${$.cyan('No')})`;
     let fullMessage = `${message} ${suggestions}`;
 
     let attempts = 0;
@@ -110,7 +155,8 @@ async function checkProfileExistence (profile) {
     debug(`Checking profile "${profile}" existence...`);
 
     const config = await readSshConfig();
-    const result = new RegExp(`^Host ${profile}`, 'mg').test(config);
+    const escapedProfile = profile.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const result = new RegExp(`^Host ${escapedProfile}`, 'mg').test(config);
 
     if (result) {
         debug(`Checking profile "${profile}" finished - profile exists!`);
@@ -119,6 +165,35 @@ async function checkProfileExistence (profile) {
     }
 
     return result;
+}
+
+async function cloneRepo (email, profile, remoteRelativePath, localFullPath) {
+    debug(`Preparing repository "${remoteRelativePath}"...`)
+    debug(`Repository full path: ${localFullPath}`)
+
+    const localParentPath = path.dirname(localFullPath);
+    const localRepoDir = path.basename(localFullPath);
+
+    const subDirectories = await readDir(localParentPath)
+        .catch(error => {
+            if (error.code === 'ENOENT') return [];
+            throw error;
+        });
+
+    if (subDirectories.includes(localRepoDir)) {
+        debug(`Preparing repository "${remoteRelativePath}" skipped!`);
+
+        return false;
+    }
+
+    const repoOriginUrl = `${profile}:${remoteRelativePath}`;
+
+    debug(`Clonning repository with origin URL "${repoOriginUrl}"...`);
+
+    await executePiped(`git clone ${repoOriginUrl} ${localFullPath}`);
+    console.log($.green(`Clonning repository succeeded!`));
+
+    return true;
 }
 
 async function configureGitUser (email, repoDirectory) {
@@ -137,23 +212,58 @@ async function configureGitUser (email, repoDirectory) {
     return userSignature;
 }
 
-async function configureProfile (email, profile) {
+async function configureProfile (serviceName, email, profile, specifiedSshKey) {
     debug(`Configuring profile "${profile}" in SSH config...`)
 
-    const keyName = getKeyName(email);
-    await createSshKey(keyName, email);
+    let keyFullPath;
+    let sshKeyGenerated = false;
+    if (specifiedSshKey) {
+        keyFullPath = path.resolve(specifiedSshKey).replace(/\.pub$/i, '');
+        const keyParentDirectory = path.dirname(keyFullPath);
+        const keyName = path.basename(keyFullPath);
+
+        debug(`Checking SSH key: ${keyName}...`)
+
+        const existingKeyFiles = await readDir(keyParentDirectory, 'utf8');
+
+        if (!existingKeyFiles.includes(keyName)) {
+            throw `Specified private key does not exist: ${keyFullPath}`;
+        }
+        if (!existingKeyFiles.includes(`${keyName}.pub`)) {
+            throw `Specified public key does not exist: ${keyFullPath}.pub`;
+        }
+    } else {
+        const keyName = getKeyName(email);
+
+        debug(`Checking SSH key: ${keyName}...`)
+
+        const existingKeyFiles = await readDir(SSH_DIR, 'utf8');
+
+        if (existingKeyFiles.includes(keyName) && existingKeyFiles.includes(`${keyName}.pub`)) {
+            debug(`Requested key "${keyName}" exists`);
+        } else {
+            await createSshKey(keyName, email);
+            sshKeyGenerated = true;
+        }
+    }
 
     const configLines = [
         '',
-        `# ${email}`,
+        `# ${email} for ${serviceName}`,
         `Host ${profile}`,
-        `  IdentityFile ~/.ssh/${keyName}`,
+        `  IdentityFile ${keyFullPath}`,
+        `  IdentitiesOnly yes`,
+        `  HostName ${serviceName}`,
+        `  StrictHostKeyChecking no`,
+        `  User git`,
         ''
     ].join('\n');
 
     await appendFile(SSH_CONFIG_PATH, configLines);
 
-    debug(`Configuring profile "${profile}" in SSH config succeeded!`)
+    debug(`Configuring profile "${profile}" in SSH config succeeded!`);
+
+    return sshKeyGenerated;
 }
 
 function createColors () {
@@ -233,7 +343,7 @@ function createColors () {
     const createStyler = (styles = []) => new Proxy((str) => {
         return styles.reduce((acc, style) => applyStyle(style, acc), str);
     }, {
-        get(target, prop, receiver) {
+        get(target, prop, _receiver) {
             if (['close', 'open'].includes(prop)) { return getPartialStyler(styles, prop); }
 
             if (!availableStyles.includes(prop)) return target[prop];
@@ -256,26 +366,68 @@ function createColors () {
     // console.log($.underline(`This is just underlined text. ${$.red('This text must be red and underlined.')} This text must be just underlined again`));
     // console.log($.bold(`This is just bold text. ${$.underline('This text must be underlined and bold.')} This text must be just bold again`));
     // console.log($.bold(`This is just bold text. ${$.dim('This text must be dim and bold.')} This text must be just bold again`));
+    // console.log([
+    //     $.red.bgWhite('keyContent'),
+    //     '',
+    //     `---`
+    // ].join('\n'));
     // process.exit();
 
     return createStyler();
 }
 
 async function createSshKey (keyName, comment) {
-    const existingKeyFiles = await readDir(SSH_DIR, 'utf8');
-
-    if (existingKeyFiles.includes(keyName) && existingKeyFiles.includes(`${keyName}.pub`)) {
-        debug(`Requested key "${keyName}" exists`);
-        return;
-    }
-
     return executeBuffered(`ssh-keygen -t ed25519 -f ${SSH_DIR}/${keyName} -C "${comment}" -q -N ""`);
 }
 
 function debug (message) {
-    if (DEBUG) {
+    if (ARGS.debug) {
         console.debug($.grey.italic(message));
     }
+}
+
+async function ensureMainArgs (passedArgs) {
+    const email = passedArgs.email || await ask(`Insert account email ${getExampleStr('john.doe@smart.com')}:`);
+
+    if (!email) {
+        throw `Account email is mandatory!`;
+    }
+
+    const repository = passedArgs.repository || await ask([
+        'Insert project clone URL or command',
+        getExampleStr('https://github.com/facebook/react.git'),
+        getExampleStr('git@github.com:facebook/react.git'),
+        getExampleStr('git clone https://github.com/facebook/react.git'),
+        getExampleStr('git clone git@github.com:facebook/react.git'),
+        ':'
+    ].join('\n'));
+
+    if (!repository) {
+        throw `Repository clone URL or command is mandatory!`;
+    }
+
+    await ask(`You specified email ${$.bgBlue.white(email)} and git project URL ${$.bgBlue.white(repository)}.`);
+
+    const repositoryUrlParts = repository
+        .replace(/^(git clone )?(?:https?:\/\/|git@)/gi, '')
+        .match(/^(?<serviceName>[^:/]+)[:/](?<repoPath>.+)$/)
+        .groups;
+
+    if (!Object.keys(CONFIG_URLS).includes(repositoryUrlParts.serviceName)) {
+        const message = $.magenta([
+            `Unfortunately, settings for ${repositoryUrlParts.serviceName} was not tested, so it may not work.`,
+            'Proceed on your own risk.',
+            '¯\\_(ツ)_/¯'
+        ].join('\n'));
+
+        if (repository === passedArgs.repository) {
+            console.log(message);
+        } else {
+            await ask(message);
+        }
+    }
+
+    return { email, ...repositoryUrlParts };
 }
 
 async function executeBuffered (command, cwd) {
@@ -322,7 +474,7 @@ function getEmailSafeString (email) {
 }
 
 function getExampleStr (message) {
-    return `(${$.italic(`Example: ${$.cyan(message)}`)})`;
+    return $.italic.cyan(`(Example: ${$.white(message)})`);
 }
 
 function getKeyName (email) {
@@ -343,8 +495,6 @@ async function getGitUserName (email, repoDirectory) {
     if (userSignature) {
         const userName = /^[^ ]* ?(.*)$/.exec(userSignature.trim())[1];
 
-        if (isQuietMode('User name from git checking')) { return userName; }
-
         const userAnswer = await ask([
             `Following user name found in previous commits in git: ${$.red(userName)}.`,
             `Specify another name or left empty to use found name:`
@@ -355,8 +505,6 @@ async function getGitUserName (email, repoDirectory) {
         const emailName = email.split('@')[0];
         const userName = emailName[0].toUpperCase() + emailName.substring(1);
 
-        if (isQuietMode('User name from email address')) { return userName; }
-
         const userAnswer = await ask([
             `Previous commits for this email were not found, so user name generated from email: ${$.red.bold(userName)}.`,
             `Specify another name or left empty to use generated name:`
@@ -366,95 +514,79 @@ async function getGitUserName (email, repoDirectory) {
     }
 }
 
-function isQuietMode (action) {
-    if (QUIET) {
-        debug(`${action} skipped due to "quiet" mode`);
-        return true;
-    }
-    return false;
+function logStepClose () {
+    console.log($.yellow('~'.repeat(80)));
 }
 
-async function parseArgs (passedArgs) {
-    let [passedEmail, passedProjectUrl] = passedArgs;
-
-    let email;
-    let projectUrl;
-    let inputAccepted;
-
-    do {
-        email = passedEmail || await ask(`Insert account email ${getExampleStr('john.doe@smart.com')}:`);
-
-        projectUrl = passedProjectUrl || await ask([
-            'Insert project clone URL or command',
-            getExampleStr('https://github.com/facebook/react.git'),
-            getExampleStr('git@github.com:facebook/react.git'),
-            getExampleStr('git clone https://github.com/facebook/react.git'),
-            getExampleStr('git clone git@github.com:facebook/react.git'),
-            ':'
-        ].join('\n'));
-
-        // clean passed params to re-specify email and projectUrl once again if needed
-        passedEmail = passedProjectUrl = null;
-
-        if (isQuietMode('Checking user input')) {
-            inputAccepted = true;
-        } else {
-            inputAccepted = await askBoolean([
-                `You specified email ${$.bgRed.white(email)} and git project URL ${$.bgRed.white(projectUrl)}.`,
-                `Do you want to proceed? (Choose ${$.cyan('no')} to specify other values)`
-            ].join('\n'));
-        }
-    } while(!inputAccepted)
-
-    const projectUrlParts = projectUrl
-        .replace(/^(git clone )?(?:https?:\/\/|git@)/gi, '')
-        .match(/^(?<serviceName>[^:\/]+)[:\/](?<projectUrl>.+)$/)
-        .groups;
-
-    if (!Object.keys(CONFIG_URLS).includes(projectUrlParts.serviceName)) {
-        throw new Error(`Unfortunately, ${projectUrlParts.serviceName} is not supported.`);
+function logStepOpen (message) {
+    if (logStepOpen.__indentStep) {
+        console.log();
+    } else {
+        logStepOpen.__indentStep = true;
     }
-
-    return { email, ...projectUrlParts };
+    console.log($.yellow(` ${message} `.padStart(Math.floor((80 - message.length) / 2) + message.length + 1, '~').padEnd(80, '~')));
+    indentAskPrompt = false;
 }
 
-async function prepareRepo (email, profile, projectUrl) {
-    debug(`Preparing repository "${projectUrl}"...`)
+function parseArgs (args) {
+    const parsed = {
+        fileName: path.basename(args[1]),
+    };
 
-    const repoDirectory = /([^\/]+).git$/.exec(projectUrl)[1];
+    const valuableParams = [];
 
-    let repoClonningIsNeeded = true;
-
-    const subDirectories = await readDir('.');
-
-    if (subDirectories.includes(repoDirectory)) {
-        repoClonningIsNeeded = false;
-
-        if (!isQuietMode('Repository re-creating')) {
-            if (await askBoolean(`Directory ${$.red(repoDirectory)} already exists in current directory. Do you want to ${$.red.bold('re-create')} the repository? ${$.red.bold('All repo data will be lost forever')}`, false)) {
-                debug('Removing the repo directory');
-                await removeDir(repoDirectory, { recursive: true });
-                repoClonningIsNeeded = true;
-            } else {
-                debug('Repo directory left untouched');
+    for (const { alias, name, type } of PARAMETERS_SCHEMA) {
+        if (type === null) {
+            if (args.includes(`-${alias}`) || args.includes(`--${name}`)) {
+                return {
+                    ...parsed,
+                    [name]: true
+                };
             }
+        } else {
+            valuableParams.push({ alias, name, type });
+            parsed[name] = type === Boolean ? false : null;
         }
     }
 
-    if (repoClonningIsNeeded) {
-        const repoOriginUrl = `${profile}:${projectUrl}`;
+    const params = args.slice(2);
 
-        debug(`Clonning repository with origin URL "${repoOriginUrl}"...`);
+    // Short version params definition
+    if (params[0] && !params[0].startsWith('-')) {
+        parsed.email = params.shift();
 
-        await executePiped(`git clone ${repoOriginUrl}`);
-        console.log($.green(`Clonning repository succeeded!`));
+        if (params[0] && !params[0].startsWith('-')) {
+            parsed.repository = params.shift();
+        }
     }
 
-    const userSignature = await configureGitUser(email, repoDirectory);
+    for (let i = 0, l = params.length; i < l; i++) {
+        const keyParts = /^(?:-([a-z])|--([a-z]{2,}))$/.exec(params[i]);
+        const key = keyParts && (keyParts[1] || keyParts[2]);
+        let found = false;
 
-    debug(`Preparing repository "${projectUrl}" succeeded!`);
+        for (const { alias, name, type } of valuableParams) {
+            if (key !== alias && key !== name) continue;
 
-    return { repoDirectory, userSignature };
+            if (type === Boolean) {
+                parsed[name] = true;
+            } else {
+                parsed[name] = params[++i];
+            }
+
+            found = true;
+            break;
+        }
+
+        if (!found) {
+            return {
+                ...parsed,
+                error: `Unexpected parameter: ${params[i]}`
+            };
+        }
+    }
+
+    return parsed;
 }
 
 async function readSshConfig () {
@@ -463,24 +595,24 @@ async function readSshConfig () {
 
     const rawContent = await readFile(SSH_CONFIG_PATH);
     const content = rawContent
-        .replace(/\#[^\n]*\n/gim, '')
+        .replace(/#[^\n]*\n/gim, '')
         .replace(/\n+/gim, '\n')
 
     return readSshConfig.__content = content;
 }
 
-async function setupSshKey (email, serviceName) {
+async function setupSshKeyAtRemoteService (email, serviceName) {
     debug(`Settig up SSH key in "${serviceName}"...`)
 
     const keyName = `${getKeyName(email)}.pub`;
 
     const keyContent = await readFile(`${SSH_DIR}/${keyName}`);
-    const configUrl = CONFIG_URLS[serviceName];
+    const configUrl = CONFIG_URLS[serviceName] || `https://${serviceName}`;
 
     await ask([
         `Copy the following lines into your clipboard and paste them as SSH key content at ${$.cyan(configUrl)} (${$.magenta(`ensure, that you authenticated as ${$.red(email)}!`)}):`,
         '',
-        $.red.bgWhite(keyContent),
+        $.red.bgWhite(keyContent.trim()),
         '',
         `Press ${$.green('Enter')} when you finish setup at ${$.cyan(serviceName)}.`
     ].join('\n'));
@@ -490,6 +622,30 @@ async function setupSshKey (email, serviceName) {
     // TODO: Check chmod for files and directories if needed
 
     // TODO: Remove keys from SSH agent
+}
+
+function showUsage () {
+    const ggg = ARGS.fileName;
+    console.log([
+        $.green(`Usage: `) + $.yellow(`${ggg} [user_email] [git_repository_URL_or_clone_command_] [OPTIONS]...`),
+        $.cyan(`Setup git repository with some useful additions.`),
+        ``,
+        ...PARAMETERS_SCHEMA.map(({ alias, description, name }) => $.green(
+            `  -${alias}, --${name.padEnd(15, ' ')} ${description}`
+        )),
+        ``,
+        $.green(`Examples:`),
+        $.yellow(`  ${ggg}`),
+            $.cyan(`        Run setup and all necessary settings will be prompted.`),
+        $.yellow(`  ${ggg} user@sample.com https://github.com/facebook/react.git`),
+            $.cyan(`        Run setup with specified user email address and repository link; other necessary settings will be prompted.`),
+        $.yellow(`  ${ggg} -p ./react_local -r https://github.com/facebook/react.git`),
+            $.cyan(`        Run setup with specified user email address, repository link and destination path.`),
+    ].join('\n'));
+}
+
+function showVersion () {
+    console.log(`${ARGS.fileName} Version ${VERSION}`);
 }
 
 main()
