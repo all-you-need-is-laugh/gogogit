@@ -37,3 +37,9 @@ or just
 ```shell
 $ ggg developer@gmail.com https://github.com/facebook/react.git
 ```
+
+3. Check help for more details
+```shell
+$ ggg --help
+```
+
