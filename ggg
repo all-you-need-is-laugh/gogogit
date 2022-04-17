@@ -93,7 +93,9 @@ async function main () {
 
     logStepOpen('Step 4: Clone repository');
     const relativePath = ARGS.path ? ARGS.path : /([^/]+).git$/.exec(repoPath)[1];
+    debug(`Repo local relative path`, relativePath);
     const localFullPath = path.resolve(relativePath);
+    debug(`Repo local absolute path`, localFullPath);
     const repoCloned = await cloneRepo(email, profile, repoPath, localFullPath);
     logStepClose('~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~');
 
