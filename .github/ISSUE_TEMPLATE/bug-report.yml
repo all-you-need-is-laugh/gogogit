@@ -1,5 +1,5 @@
 name: "\U0001F41E Report a problem"
-description: "Report an issue with `ggg`"
+description: "Report an issue"
 title: "Bug: (fill in)"
 labels:
   - bug
@@ -9,11 +9,11 @@ body:
   - type: dropdown
     attributes:
       label: Version
-      description: Please tell us which version of `ggg` are you running (Run `ggg --version`.)
+      description: Please tell us which version are you running (Run `ggg --version`.)
       multiple: false
       options:
         - 0.0.1
-        - 1.0.0 (Edge)
+        - 1.0.0
         - From some commit (provide commit hash in additional comments below)
     validations:
       required: true
