@@ -6,7 +6,7 @@ const PARAMETERS_SCHEMA = [
     { name: 'email',      alias: 'e', type: String,  description: 'Account email' },
     { name: 'repository', alias: 'r', type: String,  description: 'Repository URL or command' },
     { name: 'path',       alias: 'p', type: String,  description: 'Local FULL path for repository - will not be appended with repository name if specified (Default: repository name in current working directory)' },
-    { name: 'ssh-key',    alias: 's', type: String,  description: 'Use existing SSH-key' },
+    { name: 'ssh-key',    alias: 's', type: String,  description: 'Use existing SSH-key (path to public or private key - no matter)' },
     { name: 'help',       alias: 'h', type: null,    description: 'Display this help and exit' },
     { name: 'version',    alias: 'v', type: null,    description: 'Output version information and exit' },
     { name: 'debug',      alias: 'd', type: Boolean, description: 'Show debug messages' },
@@ -661,6 +661,8 @@ function showUsage () {
             $.cyan(`        Run setup with specified user email address and repository link; other necessary settings will be prompted.`),
         $.yellow(`  ${ggg} -p ./projects/react_local -r https://github.com/facebook/react.git`),
             $.cyan(`        Run setup with specified user email address, repository link and destination path.`),
+        $.yellow(`  ${ggg} -ssh-key ~/.ssh/me_id_rsa`),
+            $.cyan(`        Run setup with specified SSH key path.`),
     ].join('\n'));
 }
 
