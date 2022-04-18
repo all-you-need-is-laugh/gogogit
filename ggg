@@ -5,8 +5,8 @@ const VERSION = '1.0.0';
 const PARAMETERS_SCHEMA = [
     { name: 'email',      alias: 'e', type: String,  description: 'Account email' },
     { name: 'repository', alias: 'r', type: String,  description: 'Repository URL or command' },
-    { name: 'path',       alias: 'p', type: String,  description: 'Local path for repository (Default: repository name in current working directory)' },
-    { name: 'ssh-key',    alias: 's', type: String,  description: 'Use existing SSH-key' },
+    { name: 'path',       alias: 'p', type: String,  description: 'Local FULL path for repository - will not be appended with repository name if specified (Default: repository name in current working directory)' },
+    { name: 'ssh-key',    alias: 's', type: String,  description: 'Use existing SSH-key (path to public or private key - no matter)' },
     { name: 'help',       alias: 'h', type: null,    description: 'Display this help and exit' },
     { name: 'version',    alias: 'v', type: null,    description: 'Output version information and exit' },
     { name: 'debug',      alias: 'd', type: Boolean, description: 'Show debug messages' },
@@ -93,9 +93,9 @@ async function main () {
 
     logStepOpen('Step 4: Clone repository');
     const relativePath = ARGS.path ? ARGS.path : /([^/]+).git$/.exec(repoPath)[1];
-    debug(`Repo local relative path`, relativePath);
+    debug(`Repo local relative path: ${relativePath}`);
     const localFullPath = path.resolve(relativePath);
-    debug(`Repo local absolute path`, localFullPath);
+    debug(`Repo local absolute path: ${localFullPath}`);
     const repoCloned = await cloneRepo(email, profile, repoPath, localFullPath);
     logStepClose('~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~');
 
@@ -144,7 +144,7 @@ async function askBoolean (message, defaultYes = true) {
         if (firstLetter === 'n') return false;
 
         fullMessage = [
-            'Please, specify one of the following answers (case insensitive): y, n, yes, no.',
+            'Please, specify one of the following options (case insensitive): y, n, yes, no.',
             `Or press Enter for default answer (${defaultYes ? 'yes' : 'no'})`
         ].join('\n');
     } while(++attempts < 3);
@@ -174,7 +174,11 @@ async function cloneRepo (email, profile, remoteRelativePath, localFullPath) {
     debug(`Repository full path: ${localFullPath}`)
 
     const localParentPath = path.dirname(localFullPath);
+    debug(`Local repo parent directory path: ${localParentPath}`);
     const localRepoDir = path.basename(localFullPath);
+    debug(`Local repo dir name: ${localRepoDir}`);
+
+    const repoOriginUrl = `${profile}:${remoteRelativePath}`;
 
     const subDirectories = await readDir(localParentPath)
         .catch(error => {
@@ -183,12 +187,24 @@ async function cloneRepo (email, profile, remoteRelativePath, localFullPath) {
         });
 
     if (subDirectories.includes(localRepoDir)) {
-        debug(`Preparing repository "${remoteRelativePath}" skipped!`);
+        debug(`Destination directory exists: ${localFullPath}`);
 
-        return false;
+        const directoryContent = await readDir(localFullPath);
+
+        if (directoryContent.length) {
+            debug(`Destination directory is not empty: ${localFullPath}`);
+
+            const remoteExistingUrl = await executeBuffered(`git config --get remote.origin.url`, localFullPath)
+                .catch(_err => '');
+
+            if (repoOriginUrl === remoteExistingUrl.trim()) {
+                console.log($.cyan(`Repository already cloned!`));
+                return true;
+            }
+
+            throw `Specified directory is not empty! Please, choose empty or absent directory or directory with cloned project.`;
+        }
     }
-
-    const repoOriginUrl = `${profile}:${remoteRelativePath}`;
 
     debug(`Clonning repository with origin URL "${repoOriginUrl}"...`);
 
@@ -247,6 +263,8 @@ async function configureProfile (serviceName, email, profile, specifiedSshKey) {
             await createSshKey(keyName, email);
             sshKeyGenerated = true;
         }
+
+        keyFullPath = path.join(SSH_DIR, keyName);
     }
 
     const configLines = [
@@ -641,8 +659,10 @@ function showUsage () {
             $.cyan(`        Run setup and all necessary settings will be prompted.`),
         $.yellow(`  ${ggg} user@sample.com https://github.com/facebook/react.git`),
             $.cyan(`        Run setup with specified user email address and repository link; other necessary settings will be prompted.`),
-        $.yellow(`  ${ggg} -p ./react_local -r https://github.com/facebook/react.git`),
+        $.yellow(`  ${ggg} -p ./projects/react_local -r https://github.com/facebook/react.git`),
             $.cyan(`        Run setup with specified user email address, repository link and destination path.`),
+        $.yellow(`  ${ggg} -ssh-key ~/.ssh/me_id_rsa`),
+            $.cyan(`        Run setup with specified SSH key path.`),
     ].join('\n'));
 }
 
