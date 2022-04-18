@@ -263,6 +263,8 @@ async function configureProfile (serviceName, email, profile, specifiedSshKey) {
             await createSshKey(keyName, email);
             sshKeyGenerated = true;
         }
+
+        keyFullPath = path.join(SSH_DIR, keyName);
     }
 
     const configLines = [
