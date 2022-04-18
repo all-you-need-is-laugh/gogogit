@@ -1,18 +1,16 @@
 name: "\U0001F4DD Request a new feature"
 description: "Request a new feature"
-title: "Feture Request: (fill in)"
+title: "Feture Request: ..."
 labels:
   - enhancement
 body:
 
-  - type: dropdown
+  - type: input
+    id: version
     attributes:
       label: Version
       description: Please tell us which version are you currently using (Run `ggg --version`.)
-      multiple: false
-      options:
-        - 0.0.1
-        - 1.0.0
+      placeholder: X.Y.Z
     validations:
       required: true
 
