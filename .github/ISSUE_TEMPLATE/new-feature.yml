@@ -1,6 +1,6 @@
 name: "\U0001F4DD Request a new feature"
 description: "Request a new feature"
-title: "Feture Request: ..."
+title: "Feature Request: ..."
 labels:
   - enhancement
 body:
