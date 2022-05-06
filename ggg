@@ -407,7 +407,7 @@ function debug (message) {
 }
 
 async function ensureMainArgs (passedArgs) {
-    const email = passedArgs.email || await ask(`Insert account email ${getExampleStr('john.doe@smart.com')}:`);
+    const email = passedArgs.email || await ask(`Insert account email ${getExampleStr('maxim@rylskyj.ua')}:`);
 
     if (!email) {
         throw `Account email is mandatory!`;
@@ -647,22 +647,26 @@ async function setupSshKeyAtRemoteService (email, serviceName) {
 function showUsage () {
     const ggg = ARGS.fileName;
     console.log([
-        $.green(`Usage: `) + $.yellow(`${ggg} [user_email] [git_repository_URL_or_clone_command_] [OPTIONS]...`),
-        $.cyan(`Setup git repository with some useful additions.`),
+        $.green(`Usage: `) + $.cyan(`${ggg} [user_email] [git_repository_URL_or_clone_command_] [OPTIONS]...`),
+        $.yellow(`Setup git repository with some useful additions.`),
         ``,
         ...PARAMETERS_SCHEMA.map(({ alias, description, name }) => $.green(
             `  -${alias}, --${name.padEnd(15, ' ')} ${description}`
         )),
         ``,
         $.green(`Examples:`),
-        $.yellow(`  ${ggg}`),
-            $.cyan(`        Run setup and all necessary settings will be prompted.`),
-        $.yellow(`  ${ggg} user@sample.com https://github.com/facebook/react.git`),
-            $.cyan(`        Run setup with specified user email address and repository link; other necessary settings will be prompted.`),
-        $.yellow(`  ${ggg} -p ./projects/react_local -r https://github.com/facebook/react.git`),
-            $.cyan(`        Run setup with specified user email address, repository link and destination path.`),
-        $.yellow(`  ${ggg} -ssh-key ~/.ssh/me_id_rsa`),
-            $.cyan(`        Run setup with specified SSH key path.`),
+        ``,
+            $.cyan(`  ${ggg}`),
+            $.yellow(`        Run setup and all necessary settings will be prompted.`),
+        ``,
+            $.cyan(`  ${ggg} pavlo@tychyna.ua https://github.com/facebook/react.git`),
+            $.yellow(`        Run setup with specified user email address and repository link; other necessary settings will be prompted.`),
+        ``,
+            $.cyan(`  ${ggg} -p ./projects/react_local -r https://github.com/facebook/react.git`),
+            $.yellow(`        Run setup with specified user email address, repository link and destination path.`),
+        ``,
+            $.cyan(`  ${ggg} --ssh-key ~/.ssh/me_id_rsa`),
+            $.yellow(`        Run setup with specified SSH key path.`),
     ].join('\n'));
 }
 
