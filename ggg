@@ -7,6 +7,7 @@ const PARAMETERS_SCHEMA = [
     { name: 'repository', alias: 'r', type: String,  description: 'Repository URL or command' },
     { name: 'path',       alias: 'p', type: String,  description: 'Local FULL path for repository - will not be appended with repository name if specified (Default: repository name in current working directory)' },
     { name: 'ssh-key',    alias: 's', type: String,  description: 'Use existing SSH-key (path to public or private key - no matter)' },
+    { prefix: 'ssh-config',           type: String,  description: 'Pass additional fields for SSH config (see example below)' },
     { name: 'help',       alias: 'h', type: null,    description: 'Display this help and exit' },
     { name: 'version',    alias: 'v', type: null,    description: 'Output version information and exit' },
     { name: 'debug',      alias: 'd', type: Boolean, description: 'Show debug messages' },
@@ -17,6 +18,7 @@ const fs = require('fs');
 const path = require('path');
 const readline = require('readline');
 const util = require('util');
+const crypto = require('crypto');
 
 const ARGS = parseArgs(process.argv);
 
@@ -45,6 +47,8 @@ const readDir = util.promisify(fs.readdir);
 
 async function main () {
     debug('"DEBUG" mode enabled');
+    debug(`Run with the following arguments: ${JSON.stringify(ARGS)}`);
+
     if (ARGS.error) {
         console.error($.red(ARGS.error));
         return showUsage();
@@ -64,24 +68,14 @@ async function main () {
     logStepClose('~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~');
 
     logStepOpen('Step 2: generate SSH key and setup profile in SSH config');
-    const profile = getProfileName(serviceName, email)
-
-    const isProfileConfigured = await checkProfileExistence(profile);
-
-    if (isProfileConfigured) {
+    const { isConfiguredBefore, profile } = await configureSshProfile(serviceName, email, ARGS['ssh-key'], ARGS['ssh-config']);
+    if (isConfiguredBefore) {
         console.log($.cyan(`SSH key has already been generated and configured in SSH config earlier.`));
-    } else {
-        const keyGenerated = await configureProfile(serviceName, email, profile, ARGS['ssh-key']);
-        if (keyGenerated) {
-            console.log($.green(`SSH key has just been generated and configured in SSH config.`));
-        } else {
-            console.log($.green(`SSH profile has just been configured in config.`));
-        }
     }
     logStepClose('~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~');
 
     logStepOpen('Step 3: setup SSH key at remote service');
-    const setupRequested = !isProfileConfigured || await askBoolean([
+    const setupRequested = !isConfiguredBefore || await askBoolean([
         $.grey(`Sometimes setup process can be stopped after SSH key generation, but before setup at ${$.cyan(serviceName)}.`),
         `Do you want to procceed with setting up SSH key at ${$.cyan(serviceName)}?`
     ].join('\n'));
@@ -151,6 +145,11 @@ async function askBoolean (message, defaultYes = true) {
 
     console.error($.red("Correct answer was not provided during 3 attempts"));
     process.exit(2);
+}
+
+function capitalize (input) {
+    const inputStr = String(input || '');
+    return inputStr[0].toUpperCase() + inputStr.substring(1);
 }
 
 async function checkProfileExistence (profile) {
@@ -230,60 +229,45 @@ async function configureGitUser (email, repoDirectory) {
     return userSignature;
 }
 
-async function configureProfile (serviceName, email, profile, specifiedSshKey) {
-    debug(`Configuring profile "${profile}" in SSH config...`)
+async function configureSshProfile (serviceName, email, specifiedSshKey, specifiedSshConfig) {
+    const { keyFullPath, sshKeyGenerated } = await ensureSshKeyExists(email, specifiedSshKey);
 
-    let keyFullPath;
-    let sshKeyGenerated = false;
-    if (specifiedSshKey) {
-        keyFullPath = path.resolve(specifiedSshKey).replace(/\.pub$/i, '');
-        const keyParentDirectory = path.dirname(keyFullPath);
-        const keyName = path.basename(keyFullPath);
+    const sshConfig = {
+        IdentityFile: keyFullPath,
+        IdentitiesOnly: 'yes',
+        HostName: serviceName,
+        StrictHostKeyChecking: 'no',
+        User: 'git',
+    };
+    let overridden = false;
+    let profileHash = '';
 
-        debug(`Checking SSH key: ${keyName}...`)
-
-        const existingKeyFiles = await readDir(keyParentDirectory, 'utf8');
-
-        if (!existingKeyFiles.includes(keyName)) {
-            throw `Specified private key does not exist: ${keyFullPath}`;
-        }
-        if (!existingKeyFiles.includes(`${keyName}.pub`)) {
-            throw `Specified public key does not exist: ${keyFullPath}.pub`;
-        }
-    } else {
-        const keyName = getKeyName(email);
-
-        debug(`Checking SSH key: ${keyName}...`)
-
-        const existingKeyFiles = await readDir(SSH_DIR, 'utf8');
-
-        if (existingKeyFiles.includes(keyName) && existingKeyFiles.includes(`${keyName}.pub`)) {
-            debug(`Requested key "${keyName}" exists`);
-        } else {
-            await createSshKey(keyName, email);
-            sshKeyGenerated = true;
+    if (specifiedSshConfig && typeof specifiedSshConfig === 'object') {
+        for (const key of Object.keys(specifiedSshConfig)) {
+            if (sshConfig[key] !== specifiedSshConfig[key]) {
+                sshConfig[key] = specifiedSshConfig[key];
+                overridden = true;
+            }
         }
 
-        keyFullPath = path.join(SSH_DIR, keyName);
+        if (overridden) {
+            profileHash = generateHash(sshConfig, 10);
+        }
     }
 
-    const configLines = [
-        '',
-        `# ${email} for ${serviceName}`,
-        `Host ${profile}`,
-        `  IdentityFile ${keyFullPath}`,
-        `  IdentitiesOnly yes`,
-        `  HostName ${serviceName}`,
-        `  StrictHostKeyChecking no`,
-        `  User git`,
-        ''
-    ].join('\n');
+    const profile = getProfileName(serviceName, email, profileHash);
 
-    await appendFile(SSH_CONFIG_PATH, configLines);
+    const profileExists = await checkProfileExistence(profile);
 
-    debug(`Configuring profile "${profile}" in SSH config succeeded!`);
+    await writeSshProfile(serviceName, email, profile, sshConfig);
 
-    return sshKeyGenerated;
+    if (sshKeyGenerated) {
+        console.log($.green(`SSH key has just been generated and configured in SSH config as ${profile}.`));
+    } else {
+        console.log($.green(`SSH profile has just been configured in config.`));
+    }
+
+    return { isConfiguredBefore: !sshKeyGenerated && profileExists, profile };
 }
 
 function createColors () {
@@ -397,6 +381,7 @@ function createColors () {
 }
 
 async function createSshKey (keyName, comment) {
+    debug(`Creating SSH key "${keyName}" for "${comment}"...`);
     return executeBuffered(`ssh-keygen -t ed25519 -f ${SSH_DIR}/${keyName} -C "${comment}" -q -N ""`);
 }
 
@@ -450,6 +435,46 @@ async function ensureMainArgs (passedArgs) {
     return { email, ...repositoryUrlParts };
 }
 
+async function ensureSshKeyExists (email, specifiedSshKey) {
+    if (specifiedSshKey) {
+        const keyFullPath = path.resolve(specifiedSshKey).replace(/\.pub$/i, '');
+        const keyParentDirectory = path.dirname(keyFullPath);
+        const keyName = path.basename(keyFullPath);
+
+        debug(`Checking SSH key: ${keyName}...`)
+
+        const existingKeyFiles = await readDir(keyParentDirectory, 'utf8');
+
+        if (!existingKeyFiles.includes(keyName)) {
+            throw `Specified private key does not exist: ${keyFullPath}`;
+        }
+        if (!existingKeyFiles.includes(`${keyName}.pub`)) {
+            throw `Specified public key does not exist: ${keyFullPath}.pub`;
+        }
+
+        return { keyFullPath, sshKeyGenerated: false };
+    }
+
+    let sshKeyGenerated = false;
+    const keyName = getKeyName(email);
+
+    debug(`Checking SSH key: ${keyName}...`)
+
+    const existingKeyFiles = await readDir(SSH_DIR, 'utf8');
+
+    if (existingKeyFiles.includes(keyName) && existingKeyFiles.includes(`${keyName}.pub`)) {
+        debug(`Requested key "${keyName}" exists`);
+    } else {
+        await createSshKey(keyName, email);
+        sshKeyGenerated = true;
+    }
+
+    return {
+        keyFullPath: path.join(SSH_DIR, keyName),
+        sshKeyGenerated
+    };
+}
+
 async function executeBuffered (command, cwd) {
     debug(`Executing command (buffered): ${command} (cwd: ${cwd})`);
 
@@ -489,6 +514,26 @@ async function executePiped (fullCommand, cwd) {
     });
 }
 
+function generateHash (input) {
+    if (typeof input === 'function') throw new Error('Hashing of fucntions is not supported!');
+
+    let inputString;
+
+    if (input && typeof input === 'object') {
+        inputString = Object.entries(input)
+            .map(([key, value]) => `${JSON.stringify(key.toLowerCase())}:${JSON.stringify(String(value).toLowerCase())}`)
+            .sort((a, b) => a.localeCompare(b))
+            .join('\n');
+    } else {
+        inputString = String(input);
+    }
+
+    return crypto.createHash('md5').update(inputString).digest('base64')
+        .replace(/=+$/, '')
+        .replace(/\+/g, '-')
+        .replace(/\//g, '_');
+}
+
 function getEmailSafeString (email) {
     return email.replace('@', '__');
 }
@@ -501,9 +546,10 @@ function getKeyName (email) {
     return `work__${getEmailSafeString(email)}`
 }
 
-function getProfileName (serviceName, email) {
+function getProfileName (serviceName, email, suffix) {
+    const suffixPart = suffix ? `-${suffix}` : '';
     // Example: github.com-test.user__gmail.com
-    return `${serviceName}-${getEmailSafeString(email)}`;
+    return `${serviceName}-${getEmailSafeString(email)}${suffixPart}`;
 }
 
 async function getGitUserName (email, repoDirectory) {
@@ -553,25 +599,35 @@ function parseArgs (args) {
         fileName: path.basename(args[1]),
     };
 
+    // type === null for one-action options like "help" or "version"
+    const oneActionOptions = PARAMETERS_SCHEMA.filter(({ type }) => type === null);
+    for (const { alias, name } of oneActionOptions) {
+        if (args.includes(`-${alias}`) || args.includes(`--${name}`)) {
+            // if we found one-action option - just stop parsing any other args and perform it
+            return {
+                ...parsed,
+                [name]: true
+            };
+        }
+    }
+
     const valuableParams = [];
 
-    for (const { alias, name, type } of PARAMETERS_SCHEMA) {
-        if (type === null) {
-            if (args.includes(`-${alias}`) || args.includes(`--${name}`)) {
-                return {
-                    ...parsed,
-                    [name]: true
-                };
-            }
+    for (const param of PARAMETERS_SCHEMA) {
+        if (param.type !== null) {
+            valuableParams.push(param);
+        }
+        // specify default values for expected options
+        if (param.prefix) {
+            parsed[param.prefix] = {};
         } else {
-            valuableParams.push({ alias, name, type });
-            parsed[name] = type === Boolean ? false : null;
+            parsed[param.name] = param.type === Boolean ? false : null;
         }
     }
 
     const params = args.slice(2);
 
-    // Short version params definition
+    // Short version params definition (`ggg <user_email> <repository_URL>`)
     if (params[0] && !params[0].startsWith('-')) {
         parsed.email = params.shift();
 
@@ -581,17 +637,26 @@ function parseArgs (args) {
     }
 
     for (let i = 0, l = params.length; i < l; i++) {
-        const keyParts = /^(?:-([a-z])|--([a-z]{2,}))$/.exec(params[i]);
+        const keyParts = /^(?:-([a-z])|--([-_a-z]{2,}))$/i.exec(params[i]);
+        // `key` can be full option name or alias
         const key = keyParts && (keyParts[1] || keyParts[2]);
         let found = false;
 
-        for (const { alias, name, type } of valuableParams) {
-            if (key !== alias && key !== name) continue;
+        for (const { alias, name, prefix, type } of valuableParams) {
+            if (prefix) {
+                if (!key.startsWith(prefix)) continue;
+                const argName = toPascalCase(key.replace(`${prefix}-`, ''));
 
-            if (type === Boolean) {
-                parsed[name] = true;
+                parsed[prefix][argName] = params[++i];
             } else {
-                parsed[name] = params[++i];
+                if (key !== alias && key !== name) continue;
+
+                // type === Boolean means that option is just a flag, so set `true` if the option was specified
+                if (type === Boolean) {
+                    parsed[name] = true;
+                } else {
+                    parsed[name] = params[++i];
+                }
             }
 
             found = true;
@@ -646,13 +711,24 @@ async function setupSshKeyAtRemoteService (email, serviceName) {
 
 function showUsage () {
     const ggg = ARGS.fileName;
+
+    const formatOptionInfoLine = ({ alias, description, name, prefix }) => {
+        let infoLine;
+
+        if (prefix) {
+            infoLine = `      --${`${prefix}-*`.padEnd(15, ' ')} ${description}`;
+        } else {
+            infoLine = `  -${alias}, --${name.padEnd(15, ' ')} ${description}`;
+        }
+
+        return $.green(infoLine);
+    };
+
     console.log([
         $.green(`Usage: `) + $.cyan(`${ggg} [user_email] [git_repository_URL_or_clone_command_] [OPTIONS]...`),
         $.yellow(`Setup git repository with some useful additions.`),
         ``,
-        ...PARAMETERS_SCHEMA.map(({ alias, description, name }) => $.green(
-            `  -${alias}, --${name.padEnd(15, ' ')} ${description}`
-        )),
+        ...PARAMETERS_SCHEMA.map(formatOptionInfoLine),
         ``,
         $.green(`Examples:`),
         ``,
@@ -667,11 +743,41 @@ function showUsage () {
         ``,
             $.cyan(`  ${ggg} --ssh-key ~/.ssh/me_id_rsa`),
             $.yellow(`        Run setup with specified SSH key path.`),
+        ``,
+            $.cyan(`  ${ggg} --ssh-config-port 22022`),
+            $.yellow(`        Run setup with additional SSH config parameter "Port 22022".`),
+        ``,
+            $.cyan(`  ${ggg} --ssh-config-port 22022 --ssh-config-user lkostenko`),
+            $.yellow(`        Run setup with additional SSH config parameters "Port 22022" and "User lkostenko".`),
     ].join('\n'));
 }
 
 function showVersion () {
     console.log(`${ARGS.fileName} Version ${VERSION}`);
+}
+
+function toPascalCase (input) {
+    const inputStr = String(input || '');
+    return inputStr.split(/[-_]/g).filter(x => x).map(capitalize).join('');
+}
+
+async function writeSshProfile (serviceName, email, profile, sshConfig) {
+    debug(`Writing profile "${profile}" in SSH config...`)
+
+    const customization = profile === getProfileName(serviceName, email) ? '' : ' (customized)';
+    const configHead = [
+        '',
+        `# ${email} for ${serviceName}${customization}`,
+        `Host ${profile}`,
+    ].join('\n');
+
+    const configBody = Object.entries(sshConfig)
+        .map(([key, value]) => `    ${key} ${value}`)
+        .join('\n')
+
+    await appendFile(SSH_CONFIG_PATH, `${configHead}\n${configBody}\n`);
+
+    debug(`Writing profile "${profile}" in SSH config succeeded!`);
 }
 
 main()
