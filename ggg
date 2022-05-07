@@ -6,8 +6,8 @@ const PARAMETERS_SCHEMA = [
     { name: 'email',      alias: 'e', type: String,  description: 'Account email' },
     { name: 'repository', alias: 'r', type: String,  description: 'Repository URL or command' },
     { name: 'path',       alias: 'p', type: String,  description: 'Local FULL path for repository - will not be appended with repository name if specified (Default: repository name in current working directory)' },
-    { name: 'ssh-key',    alias: 's', type: String,  description: 'Use existing SSH-key (path to public or private key - no matter)' },
-    { prefix: 'ssh-config',           type: String,  description: 'Pass additional fields for SSH config (see example below)' },
+    { name: 'ssh-key',    alias: 's', type: String,  description: 'Use existing SSH-key (path to public or private key - no matter)', deprecated: '--ssh-config-identity-file' },
+    { prefix: 'ssh-config',           type: String,  description: 'Pass additional fields for SSH config (see example below or https://linux.die.net/man/5/ssh_config for fields full list)' },
     { name: 'help',       alias: 'h', type: null,    description: 'Display this help and exit' },
     { name: 'version',    alias: 'v', type: null,    description: 'Output version information and exit' },
     { name: 'debug',      alias: 'd', type: Boolean, description: 'Show debug messages' },
@@ -19,6 +19,8 @@ const path = require('path');
 const readline = require('readline');
 const util = require('util');
 const crypto = require('crypto');
+
+const $ = createColors();
 
 const ARGS = parseArgs(process.argv);
 
@@ -37,7 +39,6 @@ const userInput = readline.createInterface({
     output: process.stdout
 });
 
-const $ = createColors();
 let indentAskPrompt = false;
 
 const appendFile = util.promisify(fs.appendFile);
@@ -615,6 +616,10 @@ function parseArgs (args) {
     const valuableParams = [];
 
     for (const param of PARAMETERS_SCHEMA) {
+        if (param.deprecated) {
+            console.log($.magenta(`Argument --${param.name} is deprected and will be removed in the next major version. See usage for more details.`));
+        }
+
         if (param.type !== null) {
             valuableParams.push(param);
         }
@@ -713,13 +718,15 @@ async function setupSshKeyAtRemoteService (email, serviceName) {
 function showUsage () {
     const ggg = ARGS.fileName;
 
-    const formatOptionInfoLine = ({ alias, description, name, prefix }) => {
+    const formatOptionInfoLine = ({ alias, deprecated, description, name, prefix }) => {
         let infoLine;
 
+        const fullDescription = deprecated ? `(Deprecated: use ${deprecated} instead) ${description}` : description;
+
         if (prefix) {
-            infoLine = `      --${`${prefix}-*`.padEnd(15, ' ')} ${description}`;
+            infoLine = `      --${`${prefix}-*`.padEnd(15, ' ')} ${fullDescription}`;
         } else {
-            infoLine = `  -${alias}, --${name.padEnd(15, ' ')} ${description}`;
+            infoLine = `  -${alias}, --${name.padEnd(15, ' ')} ${fullDescription}`;
         }
 
         return $.green(infoLine);
