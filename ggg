@@ -230,7 +230,8 @@ async function configureGitUser (email, repoDirectory) {
 }
 
 async function configureSshProfile (serviceName, email, specifiedSshKey, specifiedSshConfig) {
-    const { keyFullPath, sshKeyGenerated } = await ensureSshKeyExists(email, specifiedSshKey);
+    const resolvedSpecifiedSshKey = specifiedSshKey || (specifiedSshConfig && specifiedSshConfig.IdentityFile);
+    const { keyFullPath, sshKeyGenerated } = await ensureSshKeyExists(email, resolvedSpecifiedSshKey);
 
     const sshConfig = {
         IdentityFile: keyFullPath,
