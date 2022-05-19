@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-const VERSION = '1.1.0';
+const VERSION = '1.1.1';
 
 const PARAMETERS_SCHEMA = [
     { name: 'email',      alias: 'e', type: String,  description: 'Account email' },
@@ -616,10 +616,6 @@ function parseArgs (args) {
     const valuableParams = [];
 
     for (const param of PARAMETERS_SCHEMA) {
-        if (param.deprecated) {
-            console.log($.magenta(`Argument --${param.name} is deprected and will be removed in the next major version. See usage for more details.`));
-        }
-
         if (param.type !== null) {
             valuableParams.push(param);
         }
@@ -648,9 +644,10 @@ function parseArgs (args) {
         const key = keyParts && (keyParts[1] || keyParts[2]);
         let found = false;
 
-        for (const { alias, name, prefix, type } of valuableParams) {
+        for (const { alias, deprecated, name, prefix, type } of valuableParams) {
             if (prefix) {
                 if (!key.startsWith(prefix)) continue;
+
                 const argName = toPascalCase(key.replace(`${prefix}-`, ''));
 
                 parsed[prefix][argName] = params[++i];
@@ -663,6 +660,10 @@ function parseArgs (args) {
                 } else {
                     parsed[name] = params[++i];
                 }
+            }
+
+            if (deprecated) {
+                console.log($.magenta(`Argument --${name} is deprected and will be removed in the next major version. See usage for more details.`));
             }
 
             found = true;
