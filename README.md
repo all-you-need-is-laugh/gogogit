@@ -1,4 +1,4 @@
-# Git setup helper a.k.a `ggg`
+# Git setup helper a.k.a `gogogit`, a.k.a `ggg`
 Helper for setup git repo locally via SSH:
 * Creates SSH-key
 * Edits SSH config with necessary settings for profile

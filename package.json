@@ -2,5 +2,23 @@
   "dependencies": {},
   "devDependencies": {
     "eslint": "^8.13.0"
-  }
+  },
+  "name": "gogogit",
+  "description": "Helper for setup git repo locally via SSH:\r * Creates SSH-key\r * Edits SSH config with necessary settings for profile\r * Clones Git repo\r * Sets up user name and email in repository",
+  "version": "1.1.1",
+  "main": "ggg",
+  "scripts": {
+    "test": "-"
+  },
+  "repository": {
+    "type": "git",
+    "url": "github.com:all-you-need-is-laugh/gogogit.git"
+  },
+  "keywords": [
+    "git",
+    "ssh",
+    "setup"
+  ],
+  "author": "all-you-need-is-laugh",
+  "license": "MIT"
 }
